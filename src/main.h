@@ -108,6 +108,7 @@ extern int64 nTimeBestReceived;
 extern CCriticalSection cs_setpwalletRegistered;
 extern std::set<CWallet*> setpwalletRegistered;
 extern std::map<uint256, CBlock*> mapOrphanBlocks;
+extern std::map<uint256, CBlock*> mapDuplicateStakeBlocks;
 extern unsigned char pchMessageStart[4];
 extern bool fImporting;
 extern bool fReindex;
@@ -117,6 +118,7 @@ extern bool fTxIndex;
 extern unsigned int nCoinCacheSize;
 #ifdef TESTING
 extern uint256 hashSingleStakeBlock;
+extern int nBlocksToIgnore;
 #endif
 
 // Settings
@@ -178,7 +180,7 @@ void GenerateBitcoins(bool fGenerate, CWallet* pwallet);
 /** Run the stake minter thread */
 void MintStake(boost::thread_group& threadGroup, CWallet* pwallet);
 /** Generate a new block, without valid proof-of-work */
-CBlockTemplate* CreateNewBlock(CReserveKey& reservekey, CWallet* pwallet, bool fProofOfStake=false);
+CBlockTemplate* CreateNewBlock(CReserveKey& reservekey, CWallet* pwallet = NULL, bool fProofOfStake=false);
 /** Modify the extranonce in a block */
 void IncrementExtraNonce(CBlock* pblock, CBlockIndex* pindexPrev, unsigned int& nExtraNonce);
 /** Do mining precalculation */
@@ -200,7 +202,7 @@ std::string GetWarnings(std::string strFor);
 uint256 WantedByOrphan(const CBlock* pblockOrphan);
 const CBlockIndex* GetLastBlockIndex(const CBlockIndex* pindex, bool fProofOfStake);
 #ifdef TESTING
-void BitcoinMiner(CWallet *pwallet, bool fProofOfStake, bool fGenerateSingleBlock = false, CBlockIndex* parent = NULL);
+void BitcoinMiner(CWallet *pwallet, bool fProofOfStake, bool fGenerateSingleBlock = false, int nTimeout = 0);
 #else
 void BitcoinMiner(CWallet *pwallet, bool fProofOfStake);
 #endif
@@ -622,6 +624,9 @@ public:
         // ppcoin: the coin stake transaction is marked with the first output empty
         return (vin.size() > 0 && (!vin[0].prevout.IsNull()) && vout.size() >= 2 && vout[0].IsEmpty());
     }
+
+    // ppcoin: returns true if the transaction a CoinStake and the coins are not moved nor destroyed
+    bool IsRestrictedCoinStake() const;
 
     /** Check for standard transaction types
         @return True if all outputs (scriptPubKeys) use only standard transaction forms

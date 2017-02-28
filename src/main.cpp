@@ -63,6 +63,7 @@ int64 CTransaction::nMinRelayTxFee = MIN_RELAY_TX_FEE;
 CMedianFilter<int> cPeerBlockCounts(8, 0); // Amount of blocks that other nodes claim to have
 
 map<uint256, CBlock*> mapOrphanBlocks;
+map<uint256, CBlock*> mapDuplicateStakeBlocks;
 multimap<uint256, CBlock*> mapOrphanBlocksByPrev;
 set<pair<COutPoint, unsigned int> > setStakeSeenOrphan;
 map<uint256, uint256> mapProofOfStake;
@@ -80,6 +81,7 @@ int64 nHPSTimerStart = 0;
 
 #ifdef TESTING
 uint256 hashSingleStakeBlock;
+int nBlocksToIgnore = 0;
 #endif
 
 // Settings
@@ -962,7 +964,11 @@ int CMerkleTx::GetBlocksToMaturity() const
 {
     if (!(IsCoinBase() || IsCoinStake()))
         return 0;
+#ifdef TESTING
+    return max(0, (nCoinbaseMaturity+ 1) - GetDepthInMainChain());
+#else
     return max(0, (nCoinbaseMaturity+20) - GetDepthInMainChain());
+#endif
 }
 
 
@@ -1424,6 +1430,65 @@ bool CScriptCheck::operator()() const {
 bool VerifySignature(const CCoins& txFrom, const CTransaction& txTo, unsigned int nIn, unsigned int flags, int nHashType)
 {
     return CScriptCheck(txFrom, txTo, nIn, flags, nHashType)();
+}
+
+bool CTransaction::IsRestrictedCoinStake() const
+{
+    if (!IsCoinStake())
+        return false;
+
+    CCoinsViewCache inputs(*pcoinsTip, true);
+
+    int64 nValueIn = 0;
+    CScript onlyAllowedScript;
+    for (unsigned int i = 0; i < vin.size(); i++)
+    {
+        const COutPoint& prevout = vin[i].prevout;
+
+        CCoins coins;
+        if (!inputs.GetCoins(prevout.hash, coins))
+            return false;
+
+        if (!coins.IsAvailable(prevout.n))
+            return false;
+
+        const CTxOut& prevtxo = coins.vout[prevout.n];
+        const CScript& prevScript = prevtxo.scriptPubKey;
+
+        if (i == 0)
+        {
+            onlyAllowedScript = prevScript;
+
+            if (onlyAllowedScript.empty())
+                return false;
+        }
+        else
+        {
+            if (prevScript != onlyAllowedScript)
+                return false;
+        }
+
+        nValueIn += prevtxo.nValue;
+    }
+
+    int64 nValueOut = 0;
+    for (unsigned int i = 1; i < vout.size(); i++)
+    {
+        const CTxOut& txo = vout[i];
+
+        if (txo.nValue == 0)
+            continue;
+
+        if (txo.scriptPubKey != onlyAllowedScript)
+            return false;
+
+        nValueOut += txo.nValue;
+    }
+
+    if (nValueOut < nValueIn)
+        return false;
+
+    return true;
 }
 
 bool CTransaction::CheckInputs(CValidationState &state, CCoinsViewCache &inputs, bool fScriptChecks, unsigned int flags, std::vector<CScriptCheck> *pvChecks) const
@@ -2424,7 +2489,7 @@ bool CBlock::AcceptBlock(CValidationState &state, CDiskBlockPos *dbp)
             return state.Invalid(error("AcceptBlock() : rejected by synchronized checkpoint"));
 
         // Reject block.nVersion=1 blocks when 95% (75% on testnet) of the network has upgraded:
-        if (nVersion < 2)
+        if (nVersion < 2 && IsProtocolV05(nTime))
         {
             if ((!fTestNet && CBlockIndex::IsSuperMajority(2, pindexPrev, 950, 1000)) ||
                 (fTestNet && CBlockIndex::IsSuperMajority(2, pindexPrev, 75, 100)))
@@ -2492,8 +2557,57 @@ bool CBlockIndex::IsSuperMajority(int minVersion, const CBlockIndex* pstart, uns
     return (nFound >= nRequired);
 }
 
+void CleanUpOldDuplicateStakeBlocks()
+{
+    int64 maxAge = 24 * 60 * 60;
+    int64 minTime = GetAdjustedTime() - maxAge;
+
+    BOOST_FOREACH(PAIRTYPE(const uint256, CBlock*)& item, mapDuplicateStakeBlocks)
+    {
+        const uint256& hash = item.first;
+        CBlock* block = item.second;
+        if (block)
+        {
+            if (block->GetBlockTime() < minTime)
+            {
+                mapDuplicateStakeBlocks.erase(hash);
+                delete block;
+            }
+        }
+        else
+        {
+            if (mapBlockIndex.count(hash) == 0)
+                mapDuplicateStakeBlocks.erase(hash);
+        }
+    }
+}
+
+static bool CheckProofOfStake(CValidationState &state, const CBlock* pblock, const uint256& hash)
+{
+    if (pblock->IsProofOfStake())
+    {
+        uint256 hashProofOfStake = 0;
+        if (!CheckProofOfStake(state, pblock->vtx[1], pblock->nBits, hashProofOfStake))
+            return false;
+        if (!mapProofOfStake.count(hash)) // add to mapProofOfStake
+            mapProofOfStake.insert(make_pair(hash, hashProofOfStake));
+    }
+    return true;
+}
+
 bool ProcessBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, CDiskBlockPos *dbp)
 {
+#ifdef TESTING
+    static set<uint256> setIgnoredBlockHashes;
+    if (nBlocksToIgnore)
+    {
+        nBlocksToIgnore--;
+        setIgnoredBlockHashes.insert(pblock->GetHash());
+        return error("ProcessBlock() : block ignored");
+    }
+    if (setIgnoredBlockHashes.count(pblock->GetHash()))
+        return error("ProcessBlock() : block ignored");
+#endif
     // Check for duplicate
     uint256 hash = pblock->GetHash();
     if (mapBlockIndex.count(hash))
@@ -2508,13 +2622,20 @@ bool ProcessBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, CDiskBl
 
         if (pindexBest->IsProofOfStake() && proofOfStake.first == pindexBest->prevoutStake)
         {
-            // The best block's stake is reused, we cancel the best block
+            // The best block's stake is reused so we revert the best block and propagate the duplicate so that other nodes do the same
 
             // Only reject the best block if the duplicate is correctly signed
             if (!pblock->CheckBlockSignature())
                 return state.DoS(100, error("ProcessBlock() : Invalid signature in duplicate block"));
 
-            printf("ProcessBlock() : block uses the same stake as the best block. Canceling the best block\n");
+            printf("ProcessBlock() : block %s uses the same stake as the best block. Cancelling the best block\n", hash.GetHex().c_str());
+
+            // Save the block to be able to accept it if a new chain is built from it despite the rejection
+            mapDuplicateStakeBlocks[hash] = new CBlock(*pblock);
+
+            // Mark the best block as duplicate
+            // We don't need to store the block because its index will kept in mapBlockIndex
+            mapDuplicateStakeBlocks[pindexBest->GetBlockHash()] = NULL;
 
             // Relay the duplicate block so that other nodes are aware of the duplication
             RelayBlock(*pblock, hash);
@@ -2541,16 +2662,10 @@ bool ProcessBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, CDiskBl
         return error("ProcessBlock() : CheckBlock FAILED");
 
     // ppcoin: verify hash target and signature of coinstake tx
-    if (pblock->IsProofOfStake())
+    if (!CheckProofOfStake(state, pblock, hash))
     {
-        uint256 hashProofOfStake = 0;
-        if (!CheckProofOfStake(state, pblock->vtx[1], pblock->nBits, hashProofOfStake))
-        {
-            printf("WARNING: ProcessBlock(): check proof-of-stake failed for block %s\n", hash.ToString().c_str());
-            return false; // do not error here as we expect this during initial block download
-        }
-        if (!mapProofOfStake.count(hash)) // add to mapProofOfStake
-            mapProofOfStake.insert(make_pair(hash, hashProofOfStake));
+        printf("WARNING: ProcessBlock(): check proof-of-stake failed for block %s\n", hash.ToString().c_str());
+        return false; // do not error here as we expect this during initial block download
     }
 
     CBlockIndex* pcheckpoint = GetLastSyncCheckpoint();
@@ -2572,6 +2687,38 @@ bool ProcessBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, CDiskBl
     // ppcoin: ask for pending sync-checkpoint if any
     if (!IsInitialBlockDownload())
         AskForPendingSyncCheckpoint(pfrom);
+
+    // ppcoin: the parent block was previously rejected because of duplicate stake
+    if (mapDuplicateStakeBlocks.count(pblock->hashPrevBlock))
+    {
+        printf("ProcessBlock() : parent block was previously rejected because of stake duplication. Reaccepting parent\n");
+        CBlock* pprevBlock = mapDuplicateStakeBlocks[pblock->hashPrevBlock];
+        if (mapBlockIndex.count(pblock->hashPrevBlock))
+        {
+            // The previous block was the highest block before removal, we just mark it as valid again
+            if (mapBlockIndex.count(pblock->hashPrevBlock) == 0)
+                return error("ProcessBlock() : previous highest block is not in index");
+            mapBlockIndex[pblock->hashPrevBlock]->nStatus &= ~BLOCK_FAILED_VALID;
+        }
+        else
+        {
+            if (!pprevBlock)
+                return error("ProcessBlock() : Previous block not stored nor in block index");
+            if (!pprevBlock->CheckBlock(state))
+                return error("ProcessBlock() : CheckBlock FAILED on previous block");
+            if (!CheckProofOfStake(state, pprevBlock, pprevBlock->GetHash()))
+                return error("ProcessBlock(): proof of stake check failed on previous block");
+            if (!pprevBlock->AcceptBlock(state, dbp))
+                return error("ProcessBlock() : AcceptBlock FAILED on previous block");
+        }
+        mapDuplicateStakeBlocks.erase(pblock->hashPrevBlock);
+        if (pprevBlock)
+            delete pprevBlock;
+    }
+
+    // ppcoin: remove old duplicated blocks from memory
+    if (mapDuplicateStakeBlocks.size())
+        CleanUpOldDuplicateStakeBlocks();
 
     // If we don't already have its previous block, shunt it off to holding area until we get it
     if (pblock->hashPrevBlock != 0 && !mapBlockIndex.count(pblock->hashPrevBlock))
@@ -2660,6 +2807,20 @@ bool CBlock::SignBlock(const CKeyStore& keystore)
             return false;
         return key.Sign(GetHash(), vchBlockSig);
     }
+    else if (whichType == TX_SCRIPTHASH)
+    {
+        CScript subscript;
+        if (!keystore.GetCScript(CScriptID(uint160(vSolutions[0])), subscript))
+            return false;
+        if (!Solver(subscript, whichType, vSolutions))
+            return false;
+        if (whichType != TX_COLDMINTING)
+            return false;
+        CKey key;
+        if (!keystore.GetKey(uint160(vSolutions[0]), key))
+            return false;
+        return key.Sign(GetHash(), vchBlockSig);
+    }
     return false;
 }
 
@@ -2685,6 +2846,49 @@ bool CBlock::CheckBlockSignature() const
             return false;
         return key.Verify(GetHash(), vchBlockSig);
     }
+    else if (whichType == TX_SCRIPTHASH)
+    {
+        // Output is a pay-to-script-hash
+        // Only allowed with cold minting
+
+        if (!IsProtocolV05(nTime))
+            return false;
+
+        if (!IsProofOfStake())
+            return false;
+
+        // CoinStake scriptSig should contain 3 pushes: the signature, the pubkey and the cold minting script
+        CScript scriptSig = vtx[1].vin[0].scriptSig;
+        if (!scriptSig.IsPushOnly())
+            return false;
+        vector<vector<unsigned char> > stack;
+        if (!EvalScript(stack, scriptSig, CTransaction(), 0, 0, 0))
+            return false;
+        if (stack.size() != 3)
+            return false;
+
+        // Verify the script is a cold minting script
+        const valtype& scriptSerialized = stack.back();
+        CScript script(scriptSerialized.begin(), scriptSerialized.end());
+        if (!Solver(script, whichType, vSolutions))
+            return false;
+        if (whichType != TX_COLDMINTING)
+            return false;
+
+        // Verify the scriptSig pubkey matches the minting key
+        valtype& vchPubKey = stack[1];
+        if (Hash160(vchPubKey) != uint160(vSolutions[0]))
+            return false;
+
+        // Verify the block signature with the minting key
+        CKey key;
+        if (!key.SetPubKey(vchPubKey))
+            return false;
+        if (vchBlockSig.empty())
+            return false;
+        return key.Verify(GetHash(), vchBlockSig);
+    }
+
     return false;
 }
 
@@ -3119,7 +3323,7 @@ bool LoadBlockIndex()
         hashGenesisBlock = uint256("00008d0d88095d31f6dbdbcf80f6e51f71adf2be15740301f5e05cc0f3b2d2c0");
         bnProofOfWorkLimit = CBigNum(~uint256(0) >> 15);
         nStakeMinAge = 60 * 60 * 24; // test net min age is 1 day
-        nCoinbaseMaturity = 60;
+        nCoinbaseMaturity = 5;
         bnInitialHashTarget = CBigNum(~uint256(0) >> 15);
         nModifierInterval = 60 * 20; // test net modifier interval is 20 minutes
 #else
@@ -5089,7 +5293,7 @@ bool CheckWork(CBlock* pblock, CWallet& wallet, CReserveKey& reservekey)
 }
 
 #ifdef TESTING
-void BitcoinMiner(CWallet *pwallet, bool fProofOfStake, bool fGenerateSingleBlock, CBlockIndex *parent)
+void BitcoinMiner(CWallet *pwallet, bool fProofOfStake, bool fGenerateSingleBlock, int nTimeout)
 #else
 void BitcoinMiner(CWallet *pwallet, bool fProofOfStake)
 #endif
@@ -5104,7 +5308,16 @@ void BitcoinMiner(CWallet *pwallet, bool fProofOfStake)
 
     string strMintMessage = _("Info: Minting suspended due to locked wallet."); 
 
+#ifdef TESTING
+    int64 nStartTime = GetTime();
+#endif
+
     try { loop {
+#ifdef TESTING
+        if (nTimeout && (GetTime() - nStartTime > nTimeout))
+            return;
+#endif
+
         while (vNodes.empty())
             MilliSleep(1000);
 
@@ -5119,15 +5332,7 @@ void BitcoinMiner(CWallet *pwallet, bool fProofOfStake)
         // Create new block
         //
         unsigned int nTransactionsUpdatedLast = nTransactionsUpdated;
-#ifdef TESTING
-        CBlockIndex* pindexPrev;
-        if (parent)
-            pindexPrev = parent;
-        else
-            pindexPrev = pindexBest;
-#else
         CBlockIndex* pindexPrev = pindexBest;
-#endif
 
         auto_ptr<CBlockTemplate> pblocktemplate(CreateNewBlock(reservekey, pwallet, fProofOfStake));
         if (!pblocktemplate.get())
@@ -5299,7 +5504,7 @@ void GenerateBitcoins(bool fGenerate, CWallet* pwallet)
     minerThreads = new boost::thread_group();
     for (int i = 0; i < nThreads; i++)
 #ifdef TESTING
-        minerThreads->create_thread(boost::bind(&BitcoinMiner, pwallet, false, false, (CBlockIndex*)NULL));
+        minerThreads->create_thread(boost::bind(&BitcoinMiner, pwallet, false, false, 0));
 #else
         minerThreads->create_thread(boost::bind(&BitcoinMiner, pwallet, false));
 #endif

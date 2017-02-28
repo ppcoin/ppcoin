@@ -287,28 +287,18 @@ Value generatestake(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
         throw runtime_error(
-            "generatestake [<parent block hash>]\n"
-            "generate a single proof of stake block on top of <parent block hash> (default: highest block hash)"
+            "generatestake [timeout]\n"
+            "generate a single proof of stake block"
             );
 
     if (GetBoolArg("-stakegen", true))
         throw JSONRPCError(-3, "Stake generation enabled. Won't start another generation.");
 
-    CBlockIndex *parent;
-    if (params.size() > 1)
-    {
-        uint256 parentHash;
-        parentHash.SetHex(params[1].get_str());
-        if (!mapBlockIndex.count(parentHash))
-            throw JSONRPCError(-3, "Parent hash not in main chain");
-        parent = mapBlockIndex[parentHash];
-    }
-    else
-    {
-        parent = pindexBest;
-    }
+    int nTimeout = 0;
+    if (params.size() > 0)
+        nTimeout = params[0].get_int();
 
-    BitcoinMiner(pwalletMain, true, true, parent);
+    BitcoinMiner(pwalletMain, true, true, nTimeout);
     return hashSingleStakeBlock.ToString();
 }
 
@@ -459,6 +449,18 @@ Value duplicateblock(const Array& params, bool fHelp)
     return result;
 }
 
+Value ignorenextblock(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "ignorenextblock"
+            );
+
+    nBlocksToIgnore++;
+
+    return "";
+}
+
 #endif
 
 
@@ -542,9 +544,11 @@ static const CRPCCommand vRPCCommands[] =
     { "gettxout",               &gettxout,               true,      false },
     { "lockunspent",            &lockunspent,            false,     false },
     { "listlockunspent",        &listlockunspent,        false,     false },
+    { "addcoldmintingaddress",  &addcoldmintingaddress,  false,     false },
 #ifdef TESTING
     { "generatestake",          &generatestake,          true,      false },
     { "duplicateblock",         &duplicateblock,         true,      false },
+    { "ignorenextblock",        &ignorenextblock,        true,      false },
     { "shutdown",               &shutdown,               true,      false },
     { "timetravel",             &timetravel,             true,      false },
 #endif
@@ -1484,6 +1488,7 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
 
 #ifdef TESTING
     if (strMethod == "timetravel"             && n > 0) ConvertTo<boost::int64_t>(params[0]);
+    if (strMethod == "generatestake"          && n > 0) ConvertTo<boost::int64_t>(params[0]);
 #endif
     return params;
 }

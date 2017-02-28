@@ -9,6 +9,7 @@ class CoinContainer
       delete_at_exit: false,
       remove_addr_after_shutdown: true,
       remove_wallet_after_shutdown: false,
+      remove_wallet_before_startup: false,
     }
 
     options = default_options.merge(options)
@@ -33,9 +34,10 @@ class CoinContainer
     end
     name = options[:name]
 
+    connect_cmd = (options[:link_with_connect] ? "-connect" : "-addnode")
     connects = links.map do |linked_name, alias_name|
       upname = alias_name.upcase
-      "-addnode=$#{upname}_PORT_9903_TCP_ADDR:$#{upname}_PORT_9903_TCP_PORT"
+      "#{connect_cmd}=$#{upname}_PORT_9903_TCP_ADDR:$#{upname}_PORT_9903_TCP_PORT"
     end
 
     default_args = {
@@ -48,6 +50,8 @@ class CoinContainer
       keypool: 1,
       stakegen: false,
       dnsseed: false,
+      printcoinstake: true,
+      debug: true,
     }
 
     args = default_args.merge(options[:args] || {})
@@ -66,26 +70,35 @@ class CoinContainer
     end
     cmd_args += connects
 
-    bash_cmd = ""
+    bash_cmd = []
 
-    if options[:show_environment]
-      bash_cmd += "echo Environment:; env; "
+    if display_name = options[:display_name]
+      bash_cmd << "echo 'Node name: #{display_name}'"
     end
 
-    bash_cmd += "./ppcoind " + cmd_args.join(" ")
+    if options[:show_environment]
+      bash_cmd << "echo Environment:"
+      bash_cmd << "env"
+    end
+
+    if options[:remove_wallet_before_startup]
+      bash_cmd << "rm -f ~/.ppcoin/testnet/wallet.dat"
+    end
+
+    bash_cmd << "./ppcoind " + cmd_args.join(" ")
 
     if options[:remove_addr_after_shutdown]
-      bash_cmd += "; rm /.ppcoin/testnet/addr.dat"
+      bash_cmd << "rm ~/.ppcoin/testnet/addr.dat"
     end
 
     if options[:remove_wallet_after_shutdown]
-      bash_cmd += "; rm /.ppcoin/testnet/wallet.dat"
+      bash_cmd << "rm ~/.ppcoin/testnet/wallet.dat"
     end
 
     command = [
       "stdbuf", "-oL", "-eL",
       '/bin/bash', '-c',
-      bash_cmd,
+      bash_cmd.join("; "),
     ]
 
     create_options = {
