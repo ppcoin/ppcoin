@@ -4,3 +4,6 @@ vscode:
     - llvm-vs-code-extensions.vscode-clangd@0.1.11:E9la1k7KuFdSKUyhgQm9GQ==
     - ms-vscode.cmake-tools@1.6.0:lvoCR5usjseB5thI3sZhWA==
     - ms-vscode.makefile-tools@0.2.0:9Glv1p9U223bNjnmeT46Tg==
+
+image:
+  file: .gitpod.Dockerfile
