@@ -10,8 +10,11 @@
 
 ### Quickstart
 
-Assuming that you do not own
+```bash
 
+
+
+```
 
 ### Community
 
