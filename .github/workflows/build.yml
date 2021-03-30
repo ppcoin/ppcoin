@@ -13,19 +13,23 @@ jobs:
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to get PR information, if any
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       
       - name: dependencies
         run: |
           sudo apt-get -y install autoconf libprotobuf-dev protobuf-compiler libminiupnpc-dev libzmq3-dev libqrencode-dev libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools libtool pkg-config libdb-dev libdb++-dev libboost-all-dev libssl-dev libevent-dev
           
           
-      - name: build
+      - name: build in Sonarcloud wrapper
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
         run: |
+          curl "https://sonarcloud.io/static/cpp/build-wrapper-linux-x86.zip" --output build-wrapper-linux-x86.zip
+          unzip build-wrapper-linux-x86.zip
+          cp build-wrapper-linux-x86/libinterceptor-x86_64.so build-wrapper-linux-x86/libinterceptor-haswell.so
+          curl 'https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-4.2.0.1873-linux.zip' --output sonar-scanner-cli-4.2.0.1873-linux.zip
+          unzip sonar-scanner-cli-4.2.0.1873-linux.zip
+          mv sonar-scanner-4.2.0.1873-linux sonar-scanner
           ./autogen.sh
-          ./configure --with-gui=qt5 --with-incompatible-bdb
-          make
+          ./configure --disable-tests --disable-bench --disable-ccache --with-gui=no --with-libs --with-daemon --with-utils --with-incompatible-bdb
+          build-wrapper-linux-x86/build-wrapper-linux-x86-64 --out-dir bw-output make clean all
+          sonar-scanner/bin/sonar-scanner -X -Dsonar.host.url="${SONAR_HOST_URL}" -Dsonar.token="${SONAR_TOKEN}"
