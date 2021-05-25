@@ -1781,6 +1781,8 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
     else
         vRecv.SetType(vRecv.GetType() | SER_POSMARKER);
 
+    LogPrintf("wtf vRecv.GetType() = %08x, result of posmarket = %x\n", vRecv.GetType(), vRecv.GetType() & SER_POSMARKER);
+
     // At this point, the outgoing message serialization version can't change.
     const CNetMsgMaker msgMaker(pfrom->GetSendVersion());
 
@@ -2708,6 +2710,7 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
         int64_t nTimeNow = GetSystemTimeInSeconds();
 
         LogPrint(BCLog::NET, "received block %s peer=%d\n", pblock2->GetHash().ToString(), pfrom->GetId());
+        LogPrint(BCLog::NET, "[ %s ]\n", pblock2->ToString());
 
         {
             const uint256 hash2(pblock2->GetHash());

@@ -9,6 +9,7 @@
 #include <primitives/transaction.h>
 #include <serialize.h>
 #include <uint256.h>
+#include <util.h>
 
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
@@ -51,8 +52,13 @@ public:
         READWRITE(nNonce);
 
         // peercoin: do not serialize nFlags when computing hash
-        if (!(s.GetType() & SER_GETHASH) && s.GetType() & SER_POSMARKER)
+        if (!(s.GetType() & SER_GETHASH) && s.GetType() & SER_POSMARKER) {
             READWRITE(nFlags);
+            LogPrintf("wtf writing/reading flags %08x\n",nFlags);
+            }
+        else {
+            LogPrintf("wtf not writing/reading flags %08x, s.GetType() = %x\n",nFlags, s.GetType());
+        }
     }
 
     void SetNull()
